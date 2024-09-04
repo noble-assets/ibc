@@ -17,7 +17,7 @@ version compatibility: (optional list of compatible implementations' releases)
 
 ## Synopsis
 
-(high-level description of and rationale for specification)
+This standard document specifies packet data structure, state machine handling logic for the transfer of permission information for [ICS 20](../ics-020-fungible-token-transfer/) token transfers. The state machine logic allows for an IBC denom on a non-native chain to be permissioned with respect to, who can send it, who can receive it and which IBC channel it can be transferred over. These permissions are controlled by the chain where the token was natively issued.
 
 ### Motivation
 
