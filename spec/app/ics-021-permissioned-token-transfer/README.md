@@ -92,9 +92,173 @@ function setup() {
 
 Once the `setup` function has been called, channels can be created via the IBC routing module.
 
+### Channel Lifecycle Management
+
+An ICS21 Channel can only be initialized by the Host module. As the token is issued on the host chain, and the transfer permissions are set from the host chain, the channel too must be initialized from the host chain. `onChanOpenInit` on the mirror chain should return error.
+
+```typescript
+// Called on Host Chain by Relayer
+function onChanOpenInit(
+  order: ChannelOrder,
+  connectionHops: [Identifier],
+  portIdentifier: Identifier,
+  channelIdentifier: Identifier,
+  counterpartyPortIdentifier: Identifier,
+  counterpartyChannelIdentifier: Identifier,
+  version: string
+): (version: string, err: Error) {
+  abortTransactionUnless(portIdentifier === "ics21host")
+  // only allow channels to be created on the "ics21mirror" port on the counterparty chain
+  abortTransactionUnless(counterpartyPortIdentifier === "ics21mirror") 
+  // currently only v1 of ICS21 is supported
+  abortTransactionUnless(version === "ics21-1")
+
+  return version, nil
+}
+```
+Since the channel is always initialized by the host module, `onChanOpenTry` on the host module should return an error. The mirror module would continue with the handshake.
+
+```typescript
+// Called on Mirror Chain by Relayer
+function onChanOpenTry(
+  order: ChannelOrder,
+  connectionHops: [Identifier],
+  portIdentifier: Identifier,
+  channelIdentifier: Identifier,
+  counterpartyPortIdentifier: Identifier,
+  counterpartyChannelIdentifier: Identifier,
+  counterpartyVersion: string
+): (version: string, err: Error) {
+  abortTransactionUnless(portIdentifier === "ics21mirror")
+  // only allows channels to be created from the "ics21host" on the couterparty chain
+  abortTransactionUnless(counterpartyChannelIdentifier === "ics21host")
+  // ensure that the host module is running on the same version we expect
+  abortTransactionUnless(counterpartyVersion === "ics21-1")
+  
+  mirrorModuleVersion = "ics21-1"
+  return mirrorModuleVersion, nil
+}
+```
+
+`onChanOpenAck` on mirror chain should return an error.
+
+```typescript
+// Called on Host chain by Relayer
+function onChanOpenAck(
+  portIdentifier: Identifier,
+  channelIdentifier: Identifier,
+  counterpartyChannelIdentifier,
+  counterpartyVersion: string
+) {
+  // ensure that the mirror module is running on the same version as we expect
+  abortTransactionUnless(counterpartyVersion === "ics21-1")
+}
+```
+`onChanOpenConfirm` on host chain should return an error.
+
+```typescript
+// Called on Mirror Chain by Relayer
+function onChanOpenConfirm(
+  portIdentifier: Identifier,
+  channelIdentifier: Identifier
+) {
+  // no-op
+}
+```
+
+### Closing handshake
+
+// todo who can initiate channel close? just host? should mirror be able to exit as well (probably not). why would hosts want to close? should we have conditions that all AllowedChannels store should be empty (wrt channels on that chain) to be able to close. If not, Should we only allow the close of the channel if there are no ics20tokens of denom across the channel?
+```typescript
+function onChanCloseInit(
+  portIdentifier: Identifier,
+  channelIdentifier: Identifier) {
+ 	// todo
+}
+```
+
+```typescript
+function onChanCloseConfirm(
+  portIdentifier: Identifier,
+  channelIdentifier: Identifier) {
+    // todo
+}
+```
+
+### Upgarde Handshake
+
+// todo : not needed for now imo, but when we wanna do ics21-2? which might have native trasfer functionality
+Advantages of native transfer, easy to ensure that tokens arent trasferred anywhere else. they all stay in the same ics21-2 channel and can only be sent back to host.  no multi hops.
+
+### Packet relay
+
+`onRecvPacket` need not be implemented for the Host chain as the Mirror chain does not issue any packets. The mirror chain on `onRecvPacket` stores the new and updated channel data.
+
+```typescript
+// Called on Mirror Chain by Relayer
+function onRecvPacket(packet Packet) {
+  ack = NewResultAcknowledgement([]byte{byte(1)})
+
+  var data: ics21types.SetAllowedChannelPacket
+  data, err = packet.GetData() 
+  if err != nil {
+    return NewErrorAcknowledgement(ics21types.ErrInvalidType)
+  }
+
+  if data.Signer != authtypes.NewModuleAddress(ics21types.ModuleName+data.CounterpartyChannelId) {
+    return NewErrorAcknowledgement(ics21types.ErrInvalidSigner)
+  }
+
+  err = StoreAllowedChannels(data)
+  if err != nil {
+    return NewErrorAcknowledgement(err)
+  }
+  return NewAcknowledgement(result)
+}
+```
+
+`onAcknowledgePacket` need not be implemented for the Mirror chain as it does not issue any packets. The host chain on `onAcknowledgePacket` checks it any error was found on the counterparty chain and resets its state to reflect the Mirror state.
+
+```typescript
+// Called on Host Chain by Relayer
+function onAcknowledgePacket(
+  packet: Packet,
+  acknowledgement: bytes
+) {
+  var data: ics21types.SetAllowedChannelPacket
+  data, err = packet.GetData() 
+  if err != nil {
+    return NewErrorAcknowledgement(ics21types.ErrInvalidType)
+  }
+
+  switch typeof(acknowledgement) {
+    case *channeltypes.Acknowledgement_Error:
+        RemoveAllowedChannel(data)
+    default:
+      // todo: are there any other potential errors we need to address? idts but verify
+  }
+}
+```
+
+`onTimeoutPacket` need not be implemented on Mirror chain. On Host, in case a packet timesout, that would mean the counterparty never got the state update, and as such the local state should be updated to reflect that.
+
+```typescript
+// Called on Host Chain by Relayer
+function onTimeoutPacket(packet: Packet) {
+  var data: ics21types.SetAllowedChannelPacket
+  data, err = packet.GetData() 
+  if err != nil {
+    return NewErrorAcknowledgement(ics21types.ErrInvalidType)
+  }
+  RemoveAllowedChannel(data)
+}
+```
+
+
 ### Identifier formats
 
-TBD
+Host Port Identifier: `ics21host`
+Mirror Port Identifier: `ics21mirror`
 
 ### Properties & Invariants
 
