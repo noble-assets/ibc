@@ -46,6 +46,7 @@ Users might wish to utilize a permissioned asset issued on one chain on another 
   1. Host Chain to Mirror Chain using a channel in ChanneAllowlist
   2. Mirror Chain to Host Chain across the channel it came from
 
+- Application of the permissions to tokens which have already been transferred before the configuration of ICS21 e.g multiple ics20 channels created and amount transferred before the creation of ICS21 channel. these should be addressed or at least identified
 
 ## Technical Specification
 
@@ -53,9 +54,23 @@ Users might wish to utilize a permissioned asset issued on one chain on another 
 
 (detailed technical specification: syntax, semantics, sub-protocols, algorithms, data structures, etc)
 
+### General Design
+
+The Host Chain is responsible for hosting a native token issuance mechanism. Any issued token denom should expose an Owner which controls the token issuance. Any number of ICS20 channels can be created between Host Chain and Mirror Chain for the transfer of these tokens. When the Owner decides to make the token permissioned, they register it with the ICS21 Host Module.  
+
+Once a Permissioned Token has been registered on the Host Chain, the Owner can now set the persmissions customization. This would include:
+1.  The ICS20 Channel IDs over which the Permissioned Token denom can be sent or received. // todo: is there any need to do receive check? should send check be enough? this will solve the potential issue in the 2nd paragraph below
+
+2. The list of pubkeys which are not allowed to interact with the Permissioned Token on Host Chain or the Mirror Chain. The pubkeys are used instead of account address as this allows the Mirror Module to derive the addresses from the pubkeys when it is locally storing the permissions. The Host Chain need not care about the address encoding schemes.
+
+The scope of the ICS21 channel is limited to communicating the upto-date Permissions of the token. The transfer of the same happens via the permissionless ICS20 protocol. 
+This causes some gotcha situations where an ICS20 channel might exist over which the Permission Token has been sent before it was registered as a Permissioned Token on the Host Chain. If that Channel ID is not part of the configured ChannelAllowlist, those tokens are now stuck on that channel with no way to retreive them back to the Host Chain.
+
+The native transfer (from account to account on same chain) of a Permissioned Token is implemented via the chain's SendRestrictions exposed by the Cosmos-SDK x/bank module. On every transfer, the function which implements the ICS21 SendRestrictions will check if the transfer token denom belongs to a known ICS21 Permissioned Token. If so, the sender and receiver addresses are checked against the AccountBlocklist. If either are in the AccountBlocklist, the transfer is cancelled.  
+
 ### Data Structures
 
-We propose a new Packet structure to be used to communicate the tokens latest permissions from the Host Chain to the Mirror Chain.
+We propose a new Packet structure to be used to communicate the tokens latest permissions from the Host Chain to the Mirror Chain, when they are updated by the Owner.
 
 ```typescript
 interface SetAccountBlocklistPacket {
@@ -70,6 +85,7 @@ interface SetAccountBlocklistPacket {
 }
 ```
 
+There is no need for custom Acknowledgement packet as the Mirror Chain does not send anything useful back to the Host Chain.
 
 ### Sub-protocols
 
@@ -77,7 +93,7 @@ interface SetAccountBlocklistPacket {
 
 ### Port & channel setup
 
-An ICS 21 Host module must always bind to a port with the id `ics21host`. Mirror Chains will bind to ports dynamically, as specified in the identifier format [section](#identifier-formats).
+An ICS 21 Host module must always bind to a port with the id `ics21host`. Mirror Chains will bind to port `ics21mirror`.
 
 The example below assumes a module is implementing the entire `ICS21HostModule` interface. The `setup` function must be called exactly once when the module is created (perhaps when the blockchain itself is initialized) to bind to the appropriate port.
 
@@ -267,11 +283,13 @@ function onTimeoutPacket(packet: Packet) {
 }
 ```
 
+### Host Chain Contract
 
-### Identifier formats
+### New Token FLow 
 
-Host Port Identifier: `ics21host`
-Mirror Port Identifier: `ics21mirror`
+### Update Permission Flow
+
+### Cosmos-SDK Contract
 
 ### Properties & Invariants
 
@@ -291,6 +309,10 @@ A future version of this standard could use a different version in the channel h
 
 - An implementation of ICS 21 Host & Mirror in Golang can be found [here](https://github.com/noble-assets/ics21).
 - An implementation of ICS 21 Mirror in [CosmWasm](https://cosmwasm.com) can be found [here](https://github.com/noble-assets/cw-ics21).
+
+## Future Improvements
+
+Handle trahsfer natively in the protocol insteaed of relying on ICS20 and building wrappers around it
 
 ## History
 
