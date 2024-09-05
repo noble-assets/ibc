@@ -21,7 +21,7 @@ This standard document specifies packet data structure, state machine handling l
 
 ### Motivation
 
-(rationale for existence of standard)
+Users might wish to utilize a permissioned asset issued on one chain on another chain. An asset might be permissioned on the native chain, but when it is IBC transferred, the asset issuer loses their capability to enforce their permissions. This application-layer standard describes a protocol for communication of asset permissions between chains connected with IBC. The permissions need to be updated only on the native chain which will then be propogated over to all the relevant IBC connected chains.
 
 ### Definitions
 
