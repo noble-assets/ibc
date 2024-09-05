@@ -74,7 +74,7 @@ We propose a new Packet structure to be used to communicate the tokens latest pe
 
 ```typescript
 interface SetAccountBlocklistPacket {
-  // denom is the Host Chain denom of the Permissioned Token
+  // denom is the Mirror Chain IBC denom of the Permissioned Token
   denom: string
   // accountblocklist_additions is the list of pubkeys added to the blocklist with
   // the new permissions update by the Owner 
@@ -89,11 +89,13 @@ There is no need for custom Acknowledgement packet as the Mirror Chain does not 
 
 ### Sub-protocols
 
-(sub-protocols, if applicable)
+The sub-protocols described herein should be implemented in Host and Mirror modules with access to the bank module and to the IBC modules.
 
-### Port & channel setup
+#### Port Setup
 
-An ICS 21 Host module must always bind to a port with the id `ics21host`. Mirror Chains will bind to port `ics21mirror`.
+##### ICS21 Host
+
+An ICS 21 Host module must always bind to a port with the id `ics21host`. 
 
 The example below assumes a module is implementing the entire `ICS21HostModule` interface. The `setup` function must be called exactly once when the module is created (perhaps when the blockchain itself is initialized) to bind to the appropriate port.
 
@@ -119,11 +121,39 @@ function setup() {
 }
 ```
 
+##### ICS21 Mirror
+
+An ICS 21 Host module must always bind to a port with the id `ics21mirror`. 
+
+The example below assumes a module is implementing the entire `ICS21MirrorModule` interface. The `setup` function must be called exactly once when the module is created (perhaps when the blockchain itself is initialized) to bind to the appropriate port.
+
+```typescript
+function setup() {
+  capability = routingModule.bindPort("ics21mirror", ModuleCallbacks{
+    onChanOpenInit,
+    onChanOpenTry,
+    onChanOpenAck,
+    onChanOpenConfirm,
+    onChanCloseInit,
+    onChanCloseConfirm,
+    onChanUpgradeInit, // read-only
+    onChanUpgradeTry,  // read-only
+    onChanUpgradeAck,  // read-only
+    onChanUpgradeOpen,
+    onRecvPacket,
+    onTimeoutPacket,
+    onAcknowledgePacket,
+    onTimeoutPacketClose
+  })
+  claimCapability("port", capability)
+}
+```
+
 Once the `setup` function has been called, channels can be created via the IBC routing module.
 
-### Channel Lifecycle Management
+#### Channel Setup Flow
 
-An ICS21 Channel can only be initialized by the Host module. As the token is issued on the host chain, and the transfer permissions are set from the host chain, the channel too must be initialized from the host chain. `onChanOpenInit` on the mirror chain should return error.
+An ICS21 Channel can only be initialized by the Host module. As the token is issued on the Host Chain, and the transfer permissions are set from the host chain, the channel too must be initialized from the host chain. `onChanOpenInit` on the mirror chain should return error.
 
 ```typescript
 // Called on Host Chain by Relayer
@@ -136,6 +166,13 @@ function onChanOpenInit(
   counterpartyChannelIdentifier: Identifier,
   version: string
 ): (version: string, err: Error) {
+  // only unordered channels allowed. this is bcuz ordered channels close on timeout
+  // we dont want that. do we? todo
+  // but also, because we only submit the changeset of permissions and not the entire 
+  // permission set, Ordered channels would make sense, to ensure n packet is accepted 
+  // before n+1. e.g we  add Alice to bloccklist in n, but remove Alice in n+1. if they
+  // are processed in wrong order, we will end up with state where Alice is still blocked
+  abortTransactionUnless(order === UNORDERED)
   abortTransactionUnless(portIdentifier === "ics21host")
   // only allow channels to be created on the "ics21mirror" port on the counterparty chain
   abortTransactionUnless(counterpartyPortIdentifier === "ics21mirror") 
@@ -195,9 +232,10 @@ function onChanOpenConfirm(
 }
 ```
 
-### Closing handshake
+#### Channel Closing Flow
 
-// todo who can initiate channel close? just host? should mirror be able to exit as well (probably not). why would hosts want to close? should we have conditions that all AllowedChannels store should be empty (wrt channels on that chain) to be able to close. If not, Should we only allow the close of the channel if there are no ics20tokens of denom across the channel?
+// todo who can initiate channel close? just host? should mirror be able to exit as well (probably not). why would hosts want to close? should we have conditions that all AllowedChannels store should be empty (wrt channels on that chain) to be able to close. If not, Should we only allow the close of the channel if there are no ics20tokens of denom across the channel? Is this entrypoint hit when an ordered channels is closed due to timeout? will need to address channel closure due to client expiry anyway
+
 ```typescript
 function onChanCloseInit(
   portIdentifier: Identifier,
@@ -214,12 +252,11 @@ function onChanCloseConfirm(
 }
 ```
 
-### Upgarde Handshake
+#### Upgarde Handshake
 
-// todo : not needed for now imo, but when we wanna do ics21-2? which might have native trasfer functionality
-Advantages of native transfer, easy to ensure that tokens arent trasferred anywhere else. they all stay in the same ics21-2 channel and can only be sent back to host.  no multi hops.
+// todo : not needed for now imo, but when we wanna do ics21-2? which might have native transfer functionality. Advantages of native transfer, easy to ensure that tokens arent trasferred anywhere else. they all stay in the same ics21-2 channel and can only be sent back to host. no multi hops. 
 
-### Packet relay
+#### Packet relay
 
 `onRecvPacket` need not be implemented for the Host chain as the Mirror chain does not issue any packets. The mirror chain on `onRecvPacket` stores the new and updated channel data.
 
@@ -228,7 +265,7 @@ Advantages of native transfer, easy to ensure that tokens arent trasferred anywh
 function onRecvPacket(packet Packet) {
   ack = NewResultAcknowledgement([]byte{byte(1)})
 
-  var data: ics21types.SetAllowedChannelPacket
+  var data: ics21types.SetAccountBlocklistPacket
   data, err = packet.GetData() 
   if err != nil {
     return NewErrorAcknowledgement(ics21types.ErrInvalidType)
@@ -237,16 +274,32 @@ function onRecvPacket(packet Packet) {
   if data.Signer != authtypes.NewModuleAddress(ics21types.ModuleName+data.CounterpartyChannelId) {
     return NewErrorAcknowledgement(ics21types.ErrInvalidSigner)
   }
-
-  err = StoreAllowedChannels(data)
+/// todo: curent implementation also shares the whitelisted channel IDs to mirror. do we need to store this in Mirror? if we know a token is permissioned, cant we just ensure that it cant do ibc trasnfer to any chain except the source chain? i.e it can only return on the channel it came from, nothing else
+  err = StoreAccountBlocklist(data) 
   if err != nil {
     return NewErrorAcknowledgement(err)
   }
   return NewAcknowledgement(result)
 }
+
+func StoreAccountBlocklist(data ics21types.SetAccountBlocklistPacket) {
+  // Getting the current permissions on the Mirror module for the Permissioned Token denom
+  denomPermissions = keeper.GetDenomPermissions(data.GetDenom())
+  // Encode the Blocklist addition pubkeys 
+  for var addedPubkey in data.GetAccountblocklistAdditions() {
+    var addedAddress = EncodeToBech32(addedPubkey)
+    denomPermissions.push(addedAddress)  
+  } 
+  // Encode the Blocklist removal pubkeys
+  for var removedPubKey in data.GetAccountBlocklistRemovals() {
+    var removedAddress = EncodeToBech32(addedPubkey)
+    denomPermissions.pop(removedAddress)
+  }
+  keper.SetDenomPermissions(data.GetDenom(), denomPermissions)
+}
 ```
 
-`onAcknowledgePacket` need not be implemented for the Mirror chain as it does not issue any packets. The host chain on `onAcknowledgePacket` checks it any error was found on the counterparty chain and resets its state to reflect the Mirror state.
+`onAcknowledgePacket` need not be implemented for the Mirror chain as it does not issue any packets. (//todo should we consider sending back the actual modifications done to the permissions in the ack packet, in case only a couple of them failed encoding etc, so we keep the valid ones and ignore the invalid ones on the mirror side and let the Host know via ack packet on what actually happened) The host chain on `onAcknowledgePacket` checks if any error was found on the counterparty chain and resets its state to reflect the Mirror state.
 
 ```typescript
 // Called on Host Chain by Relayer
@@ -254,7 +307,7 @@ function onAcknowledgePacket(
   packet: Packet,
   acknowledgement: bytes
 ) {
-  var data: ics21types.SetAllowedChannelPacket
+  var data: ics21types.SetAccountBlocklistPacket
   data, err = packet.GetData() 
   if err != nil {
     return NewErrorAcknowledgement(ics21types.ErrInvalidType)
@@ -262,7 +315,7 @@ function onAcknowledgePacket(
 
   switch typeof(acknowledgement) {
     case *channeltypes.Acknowledgement_Error:
-        RemoveAllowedChannel(data)
+        RemoveAccountBlocklist(data) // todo: this is how the current implementation handles this, but in case of single Host but multiple Mirrors, this would mean, in case one channel failed to update but all others succeeded, the Host would still reset the state and end up with state mismatch.
     default:
       // todo: are there any other potential errors we need to address? idts but verify
   }
@@ -279,15 +332,108 @@ function onTimeoutPacket(packet: Packet) {
   if err != nil {
     return NewErrorAcknowledgement(ics21types.ErrInvalidType)
   }
-  RemoveAllowedChannel(data)
+  RemoveAccountBlocklist(data) // todo: same as above. in case of Ordered channels this would close the channel. should handle that. but in general, how to handle? re-attempt to send permissions update again?
 }
 ```
 
 ### Host Chain Contract
 
-### New Token FLow 
+#### **RegisterPermissionedToken**
 
-### Update Permission Flow
+`RegisterPermissionedToken` is the entrypoint to registering an existing token to be permissioned across IBC.
+```typescript
+function RegisterPermissionedToken (
+  // denom is the existing token denom which will now be permissioned via ICS21
+  denom: string,
+  // owner is the address responsible for updating the permissions of the token
+  owner: string
+) {
+  // Ensure the denom is registered with the x.bank module
+  denomExists = GetDenomFromBank(denom)
+  abortTransactionUnless(denomExists == true)
+  
+  // todo: check if the owner is a known tokenfactory owner. alt, expose this as a keeper to be called from within token factory and not as an explicit msg 
+  SetPermissionedDenom(denom, owner)
+}
+```
+
+#### **UpdateChannelAllowlist**
+
+`UpdateChannelAllowlist` is the entrypoint to add and remove from the ChannelAllowlist for a particular denom and ICS20 channel IDs
+```typescript
+function UpdateChannelAllowlist (
+  // sender is the owner of the token as set from the `RegisterPermissionedToken` 
+  sender: string,
+  // denom is the existing Permissioned token denom
+  denom: string,
+  // allowedChannels is a list of ICS20 channels IDs over which the denom can be sent over 
+  allowedChannels: string[],
+  // removedChannels is a list of ICS20 channel IDs over which the denom cannot be sent over anymore
+  removedChannels: string[]
+) {
+  // Ensure only denom owner can update the allowlist
+  owner = GetPermissionedDenomOwner(denom)
+  abortTransactionUnless(owner == sender)
+
+  pemissions = GetDenomPermission(denom)
+  for var channel in allowedChannels {
+    // Ensure the channel is of type ICS20
+    channelInfo = GetIBCChannelInfo(channel)
+    abortTransactionUnless(channelInfo.Port == "transfer")
+    permissions.ChannelAllowlist.push(channel)
+  }
+  for var channel in removedChannels {
+    permissions.ChannelAllowlist.pop(channel)
+  }
+
+  SetPermissions(denom, permissions)
+
+  // todo: should we consider initiating a new ICS21 channel here itself for every allowedChannel? this would mean for every Permissioned Token, there will be a dedicated channel. We could store a mapping of denom -> ics21 channels across all chains. Easy lookup for when permissions need to be updated everywhere. This would also allow to use Ordered Channels without ending up in a situation where the channel closes for all due to one timeout. so it reduces surface area of that kinda issues. we could trigger channel closes for removedChannels too
+}
+```
+
+
+#### **UpdateAccountBlocklist**
+
+`UpdateAccountBlocklist` is the entrypoint used to add and remove pubkeys from the AccountsBlocklist for a particular denom
+```typescript
+function UpdateAccountBlocklist (
+  // sender is the owner of the token as set from the `RegisterPermissionedToken` 
+  sender: string,
+  // denom is the existing Permissioned token denom
+  denom: string,
+  // addToBlocklist is a list of pubkeys which cannot interact with the denom 
+  addToBlocklist: bytes[],
+  // removeFromBlocklist is a list of pubkekys which can now interact with the denom
+  removeFromBlocklist: bytes[]
+) {
+  // Ensure only denom owner can update the allowlist
+  owner = GetPermissionedDenomOwner(denom)
+  abortTransactionUnless(owner == sender)
+
+  pemissions = GetDenomPermission(denom)
+  for var pubkey in addToBlocklist {
+    abortTransactionUnless(pubkey.Valid() == true)
+    permissions.AccountBlocklist.push(pubkey)
+  }
+  for var pubkey in removeFromBlocklist {
+    permissions.AccountBlocklist.pop(pubkey)
+  }
+
+  // Set the updated list locally
+  SetPermissions(denom, permissions)
+
+  channels = GetAllICS21Channels()
+  updatePacket = ics21types.SetAccountBlocklistPacket {
+    denom = denom,
+    accountblocklist_additions = addToBlocklist
+    accountblocklist_removals = removeFromBlocklist
+  }
+  for var channel in channels {
+    handler.SendPacketOnChannel(channel, updatePacket)
+  }
+}
+```
 
 ### Cosmos-SDK Contract
 
