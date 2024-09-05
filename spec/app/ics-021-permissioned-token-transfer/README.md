@@ -25,16 +25,27 @@ Users might wish to utilize a permissioned asset issued on one chain on another 
 
 ### Definitions
 
-- `Host Chain`: The chain where the permissioned tokens are considered native. The host chain facilitates connections to mirror chains, and ensures the propagation of token specific allowlists and blocklists.
-- `Mirror Chain`: The chain receiving the permissioned tokens and issuing *controlled* voucher tokens. It is up to the mirror chain to enforce the propagated allowlists and blocklists.
-- `Allowlist`: A group of addresses that are allowed to interact with a permissioned token. Any address not on the allowlist is forbidden to interact with the token.
-- `Blocklist`: A group of addresses that aren't allowed to interact with a permissioned token. Any address not on the blocklist is allowed to interact with the token.
-
-The IBC handler interface & IBC routing module interface are as defined in [ICS 25](../../core/ics-025-handler-interface) and [ICS 26](../../core/ics-026-routing-module), respectively.
+- `Permissioned Token`: A token which might be a natively issued on a chain or created as a voucher from an ICS20 transfer, which is permissioned by an Owner on the native chain.
+- `Owner`: The account which sets the permissions for a Permissioned Token. This will likely be the creator of the token.
+- `Host Chain`: The chain where the permissioned tokens are considered native. The host chain facilitates connections to mirror chains, and ensures the propagation of token specific permissions.
+- `Host ICS20 Channel`: The channel on the Host Chain which is connected to the mirror chain using the ICS20 protocol and is used to transfer funds to and from the Host Chain to the Mirror Chain.
+- `Mirror Chain`: The chain receiving the permissioned tokens and issuing *controlled* voucher tokens. It is up to the mirror chain to enforce the propagated permissions.
+- `Mirror ICS20 Channel`: The channel on the Mirror Chain which is connected to the Host Chain usinng the ICS20 protocol and is used to transfer funds to and from the Mirror Chain to the Host Chain.
+- `AccountBlocklist`: A group of publickeys that aren't allowed to interact with a specific permissioned token. 
+- `ChannelAllowlist`: A list of ICS20 channels the permissioned token can be sent across. 
 
 ### Desired Properties
 
-(desired characteristics / properties of protocol, effects if properties are violated)
+- Preservation of account permissions crosschain, which can forbid an account from 
+  1. Sending the permissioned token
+  2. Receiving the permissioned token
+  3. Using the permmissioned token to pay for gas // todo ? is this needed?
+  4. Transferring the token back to Host Chain // todo ? should this be disallowed? Should even a blacklisted user be always able to send tokens to themselves on noble? and funds locked there
+
+- Preservation of transfer permissions crosschain which allows transfer only from
+  1. Host Chain to Mirror Chain using a channel in ChanneAllowlist
+  2. Mirror Chain to Host Chain across the channel it came from
+
 
 ## Technical Specification
 
@@ -44,19 +55,21 @@ The IBC handler interface & IBC routing module interface are as defined in [ICS 
 
 ### Data Structures
 
-We utilize the existing [ICS 20 `FungibleTokenPacketData`](../ics-020-fungible-token-transfer/README.md#data-structures) structure to transfer tokens over ICS 21 channels in order is to maintain client compatibility. Note that the Host Chain will block all transfers of permissioned token transfers over non-ICS 21 channels.
-
-Additionally, we define a new packet data type for the propagation of token allowlists and blacklists.
+We propose a new Packet structure to be used to communicate the tokens latest permissions from the Host Chain to the Mirror Chain.
 
 ```typescript
-interface PermissionPropagationPacketData {
+interface SetAccountBlocklistPacket {
+  // denom is the Host Chain denom of the Permissioned Token
   denom: string
-  allowlist_additions: string[]
-  allowlist_removals: string[]
-  blocklist_additions: string[]
-  blocklist_removals: string[]
+  // accountblocklist_additions is the list of pubkeys added to the blocklist with
+  // the new permissions update by the Owner 
+  accountblocklist_additions: bytes[]
+  // accountblocklist_removals is the list of pubkeys removed from the blocklist with
+  // the new permissions update by the Owner
+  accountblocklist_removals: string[]
 }
 ```
+
 
 ### Sub-protocols
 
