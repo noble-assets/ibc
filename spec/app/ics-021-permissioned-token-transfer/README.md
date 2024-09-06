@@ -7,7 +7,7 @@ kind: instantiation
 author: John Letey <john@nobleassets.xyz>, Daniel Kanefsky <dan@nobleassets.xyz>
 created: 2024-06-14
 modified: 2024-06-14
-requires: 25, 26
+requires: 20, 25, 26
 required-by: (optional list of ics numbers)
 implements: (optional list of ics numbers)
 version compatibility: (optional list of compatible implementations' releases)
@@ -437,9 +437,71 @@ function UpdateAccountBlocklist (
 
 ### Cosmos-SDK Contract
 
+#### Antehandler
+
+The ante handler functionality provided by the Cosmos-SDK allows the restriction of Permissioned Tokens from being sent across any channels except the channel it came from.
+For every msg in a transaction, a check if performed to see if its a ICS20 transfer message. If it is, and the denom is a Permissioned Token denom, then the source port and source channel is checked against the channel the Permissioned Token came from. If they are the same, the transfer is allowed, else an error is returned.
+
+```go
+var _ sdk.AnteDecorator = ICS21Decorator{}
+
+func (i ICS21Decorator) AnteHandle(ctx sdk.Context, tx sdk.Tx, simulate bool, next sdk.AnteHandler) (newCtx sdk.Context, err error) {
+	msgs := tx.GetMsgs()
+	for _, m := range msgs {
+		switch msg := m.(type) {
+		case *transfertypes.MsgTransfer:
+			return ctx, i.HandleMsgTransfer(ctx, msg)
+		}
+	}
+	return next(ctx, tx, simulate)
+}
+
+func (i ICS21Decorator) HandleMsgTransfer(ctx sdk.Context, msg *transfertypes.MsgTransfer) error {
+  // Ensure that an ICS21 denom can only be sent back to Host Chain and nowhere else
+	denom = msg.Token.GetDenom()
+  permissions = GetDenomPermissions(denom)
+  // if given denom is not an ICS21 denom, continue with default behaviour
+  if permissions == nil {
+    return nil
+  }
+  if ics20types.ReceiverChainIsSource(msg.SourcePort, msg.SourceChannel, denom) {
+    return nil
+  }
+  return errors.New("Attempting to send an ICS21 token on a channel it did not come from")
+}
+```
+
+#### SendRestrictionFn
+
+The x/bank module in Cosmos-SDK v0.50.x onwards allows a protocol to provide custom SendRestrictions. This can be used to ensure that the AccountBlocklist is ensured for native transfers on the Mirror Chain.
+
+`type SendRestrictionFn func(ctx context.Context, fromAddr, toAddr sdk.AccAddress, amt sdk.Coins) (newToAddr sdk.AccAddress, err error)`
+
+```typescript
+function SendRestrictionFn(
+  ctx sdk.Context, 
+  fromAddr sdk.AccAddress, 
+  toAddr sdk.AccAddress, 
+  amt sdk.Coins
+) (newToAddr sdk.AccAddress, err error) {
+  // Get the denom being transferred and its permissions
+  denom = amt.GetDenom()
+  permissions = GetDenomPermissions(denom)
+  // Ensure the sender or the receiver are not part of the blocklist
+  if permissions.AccountBlocklist.Contains(fromAddr) {
+    return nil, throw new Error("Sender is in blocklist")
+  }
+  if permissions.AccountBlocklist.Contains(toAddr) {
+    return nil, throw new Error("Receiver is in blocklist")
+  }
+  return toAddr, nil
+}
+```
+
 ### Properties & Invariants
 
 (properties & invariants maintained by the protocols specified, if applicable)
+- any ics21 denoms with multi hops
 
 ## Backwards Compatibility
 
