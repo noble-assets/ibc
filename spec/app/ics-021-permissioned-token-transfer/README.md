@@ -40,13 +40,10 @@ Users might wish to utilize a permissioned asset issued on one chain on another 
   1. Sending the permissioned token
   2. Receiving the permissioned token
   3. Using the permmissioned token to pay for gas // todo ? is this needed?
-  4. Transferring the token back to Host Chain // todo ? should this be disallowed? Should even a blacklisted user be always able to send tokens to themselves on noble? and funds locked there
 
 - Preservation of transfer permissions crosschain which allows transfer only from
   1. Host Chain to Mirror Chain using a channel in ChanneAllowlist
   2. Mirror Chain to Host Chain across the channel it came from
-
-- Application of the permissions to tokens which have already been transferred before the configuration of ICS21 e.g multiple ics20 channels created and amount transferred before the creation of ICS21 channel. these should be addressed or at least identified
 
 ## Technical Specification
 
@@ -81,7 +78,7 @@ interface SetAccountBlocklistPacket {
   accountblocklist_additions: bytes[]
   // accountblocklist_removals is the list of pubkeys removed from the blocklist with
   // the new permissions update by the Owner
-  accountblocklist_removals: string[]
+  accountblocklist_removals: bytes[]
 }
 ```
 
@@ -517,6 +514,10 @@ A future version of this standard could use a different version in the channel h
 
 - An implementation of ICS 21 Host & Mirror in Golang can be found [here](https://github.com/noble-assets/ics21).
 - An implementation of ICS 21 Mirror in [CosmWasm](https://cosmwasm.com) can be found [here](https://github.com/noble-assets/cw-ics21).
+
+## Known Issues
+
+ICS21 permissions will not apply to tokens which were sent before ICS21 was activated.
 
 ## Future Improvements
 
