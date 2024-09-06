@@ -454,12 +454,21 @@ func (i ICS21Decorator) AnteHandle(ctx sdk.Context, tx sdk.Tx, simulate bool, ne
 }
 
 func (i ICS21Decorator) HandleMsgTransfer(ctx sdk.Context, msg *transfertypes.MsgTransfer) error {
-  // Ensure that an ICS21 denom can only be sent back to Host Chain and nowhere else
+  // Host: Ensure that permissioned denom is only sent on a whitelisted channel
+  // Mirror: Ensure that an ICS21 denom can only be sent back to Host Chain and nowhere else
 	denom = msg.Token.GetDenom()
   permissions = GetDenomPermissions(denom)
   // if given denom is not an ICS21 denom, continue with default behaviour
   if permissions == nil {
     return nil
+  }
+  if ics20types.SenderChainIsSource(msg.SourcePort, msg.SourceChannel, denom) {
+    for channel range permissions.AllowedChannel {
+      if msg.SourceChannel == channel {
+        continue
+      }
+    }
+    return errors.New("Attempting to send a permissioned token to a non whitelisted channel")
   }
   if ics20types.ReceiverChainIsSource(msg.SourcePort, msg.SourceChannel, denom) {
     return nil
