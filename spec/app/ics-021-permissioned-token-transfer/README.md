@@ -25,23 +25,23 @@ Users might wish to utilize a permissioned asset issued on one chain on another 
 
 ### Definitions
 
-- `Permissioned Token`: A token which might be a natively issued on a chain or created as a voucher from an ICS20 transfer, which is permissioned by an Owner on the native chain.
+- `Permissioned Token`: A token which might be natively issued on a chain or created as a voucher from an ICS20 transfer, which is permissioned by an Owner on the Host chain.
 - `Owner`: The account which sets the permissions for a Permissioned Token. This will likely be the creator of the token.
 - `Host Chain`: The chain where the permissioned tokens are considered native. The host chain facilitates connections to mirror chains, and ensures the propagation of token specific permissions.
 - `Host ICS20 Channel`: The channel on the Host Chain which is connected to the mirror chain using the ICS20 protocol and is used to transfer funds to and from the Host Chain to the Mirror Chain.
 - `Mirror Chain`: The chain receiving the permissioned tokens and issuing *controlled* voucher tokens. It is up to the mirror chain to enforce the propagated permissions.
 - `Mirror ICS20 Channel`: The channel on the Mirror Chain which is connected to the Host Chain usinng the ICS20 protocol and is used to transfer funds to and from the Mirror Chain to the Host Chain.
 - `AccountBlocklist`: A group of publickeys that aren't allowed to interact with a specific permissioned token. 
-- `ChannelAllowlist`: A list of ICS20 channels the permissioned token can be sent across. 
+- `ChannelAllowlist`: A list of ICS20 channels the permissioned token can be sent across from the Host Chain. 
 
 ### Desired Properties
 
-- Preservation of account permissions crosschain, which can forbid an account from 
+- Preservation of account permissions on a chain, which can forbid an account from 
   1. Sending the permissioned token
   2. Receiving the permissioned token
   3. Using the permmissioned token to pay for gas // todo ? is this needed?
 
-- Preservation of transfer permissions crosschain which allows transfer only from
+- Preservation of transfer permissions crosschain which allows ICS20 transfer only from
   1. Host Chain to Mirror Chain using a channel in ChanneAllowlist
   2. Mirror Chain to Host Chain across the channel it came from
 
@@ -53,7 +53,7 @@ Users might wish to utilize a permissioned asset issued on one chain on another 
 
 ### General Design
 
-The Host Chain is responsible for hosting a native token issuance mechanism. Any issued token denom should expose an Owner which controls the token issuance. Any number of ICS20 channels can be created between Host Chain and Mirror Chain for the transfer of these tokens. When the Owner decides to make the token permissioned, they register it with the ICS21 Host Module.  
+The Host Chain is responsible for hosting a token issuance mechanism. This could be native token issuance or vouchers of IBC denoms. Any number of ICS20 channels can be created between Host Chain and Mirror Chain for the transfer of these tokens. When the Owner decides to make the token permissioned, they register it with the ICS21 Host Module using governance.  
 
 Once a Permissioned Token has been registered on the Host Chain, the Owner can now set the persmissions customization. This would include:
 1.  The ICS20 Channel IDs over which the Permissioned Token denom can be sent or received. // todo: is there any need to do receive check? should send check be enough? this will solve the potential issue in the 2nd paragraph below
@@ -163,19 +163,22 @@ function onChanOpenInit(
   counterpartyChannelIdentifier: Identifier,
   version: string
 ): (version: string, err: Error) {
-  // only unordered channels allowed. this is bcuz ordered channels close on timeout
-  // we dont want that. do we? todo
-  // but also, because we only submit the changeset of permissions and not the entire 
-  // permission set, Ordered channels would make sense, to ensure n packet is accepted 
-  // before n+1. e.g we  add Alice to bloccklist in n, but remove Alice in n+1. if they
-  // are processed in wrong order, we will end up with state where Alice is still blocked
-  abortTransactionUnless(order === UNORDERED)
+  // only ordered channels allowed. this is because we only submit the changeset of permissions
+  // and not the entire permission set. Therefore to ensure the permissions updates are applied
+  // in the right order, the channel needs to be ordered.
+  // e.g If Alice is added to blacklist in packet `n` and removed from blacklist in packet `n+`
+  // and we allow unordered channel, the packets could be processed in wrong order and might end 
+  // up in a situation where Alice is in the blacklist even though she shouldnt be.
+  abortTransactionUnless(order === ORDERED)
   abortTransactionUnless(portIdentifier === "ics21host")
   // only allow channels to be created on the "ics21mirror" port on the counterparty chain
   abortTransactionUnless(counterpartyPortIdentifier === "ics21mirror") 
   // currently only v1 of ICS21 is supported
-  abortTransactionUnless(version === "ics21-1")
-
+  versionMetadata = version as ics21types.VersionMetadata
+  abortTransactionUnless(versionMetadata.Version === "ics21-1")
+  // ensure that only one ICS21 channel can be tied to an ICS20 channel.
+  mirrorICS20CH = keeper.GetChannelMapping(versionMetadata.HostICS20CH)
+  abortTransactionUnless(mirrorICS20CH === "")
   return version, nil
 }
 ```
@@ -192,12 +195,20 @@ function onChanOpenTry(
   counterpartyChannelIdentifier: Identifier,
   counterpartyVersion: string
 ): (version: string, err: Error) {
+  abortTransactionUnless(order === ORDERED)
   abortTransactionUnless(portIdentifier === "ics21mirror")
   // only allows channels to be created from the "ics21host" on the couterparty chain
   abortTransactionUnless(counterpartyChannelIdentifier === "ics21host")
-  // ensure that the host module is running on the same version we expect
-  abortTransactionUnless(counterpartyVersion === "ics21-1")
-  
+  // currently only v1 of ICS21 is supported
+  counterpartyVersionMetadata = counterpartyVersion as ics21types.VersionMetadata
+  abortTransactionUnless(counterpartyVersionMetadata.Version === "ics21-1")
+  // ensure that ICS20 channel exists. 
+  channelFound = ibcKeeper.GetChannel(counterpartyVersionMetadata.MirrorICS20CH)
+  abortTransactionUnless(channelFound == true)
+  keeper.SetChannelStaging(channelIdentifier, {
+    Denom: (counterpartyVersionMetadata.Denom) as IBCTraceDenom,
+    ICS20: counterpartyVersionMetadata.MirrorICS20CH
+  })
   mirrorModuleVersion = "ics21-1"
   return mirrorModuleVersion, nil
 }
@@ -215,6 +226,11 @@ function onChanOpenAck(
 ) {
   // ensure that the mirror module is running on the same version as we expect
   abortTransactionUnless(counterpartyVersion === "ics21-1")
+  // set the mapping between the newly created ICS21 channel and the existing ICS20 channel
+  counterpartyVersionMetadata = counterpartyVersion as ics21types.VersionMetadata
+  keeper.SetChannelMapping(channelIdentifier, counterpartyVersionMetadata.MirrorICS20CH)
+  // set the ICS20 channel as AllowedChannel for given denom
+  keeper.SetAllowedChannel(counterpartyVersionMetadata.Denom, counterpartyVersionMetadata.MirrorICS20CH)
 }
 ```
 `onChanOpenConfirm` on host chain should return an error.
@@ -225,7 +241,8 @@ function onChanOpenConfirm(
   portIdentifier: Identifier,
   channelIdentifier: Identifier
 ) {
-  // no-op
+  stagingInfo = keeper.GetChannelStaging(channelIdentifier)
+  keeper.SetAllowedChannel(stagingInfo.Denom, stagingInfo.ICS20)
 }
 ```
 
@@ -268,10 +285,6 @@ function onRecvPacket(packet Packet) {
     return NewErrorAcknowledgement(ics21types.ErrInvalidType)
   }
 
-  if data.Signer != authtypes.NewModuleAddress(ics21types.ModuleName+data.CounterpartyChannelId) {
-    return NewErrorAcknowledgement(ics21types.ErrInvalidSigner)
-  }
-/// todo: curent implementation also shares the whitelisted channel IDs to mirror. do we need to store this in Mirror? if we know a token is permissioned, cant we just ensure that it cant do ibc trasnfer to any chain except the source chain? i.e it can only return on the channel it came from, nothing else
   err = StoreAccountBlocklist(data) 
   if err != nil {
     return NewErrorAcknowledgement(err)
@@ -292,7 +305,7 @@ func StoreAccountBlocklist(data ics21types.SetAccountBlocklistPacket) {
     var removedAddress = EncodeToBech32(addedPubkey)
     denomPermissions.pop(removedAddress)
   }
-  keper.SetDenomPermissions(data.GetDenom(), denomPermissions)
+  keper.SetDenomPermissions((data.GetDenom() as IBCTraceDenom), denomPermissions)
 }
 ```
 
@@ -312,7 +325,7 @@ function onAcknowledgePacket(
 
   switch typeof(acknowledgement) {
     case *channeltypes.Acknowledgement_Error:
-        RemoveAccountBlocklist(data) // todo: this is how the current implementation handles this, but in case of single Host but multiple Mirrors, this would mean, in case one channel failed to update but all others succeeded, the Host would still reset the state and end up with state mismatch.
+        // if the update permissions failed should we close the channel?
     default:
       // todo: are there any other potential errors we need to address? idts but verify
   }
@@ -329,7 +342,7 @@ function onTimeoutPacket(packet: Packet) {
   if err != nil {
     return NewErrorAcknowledgement(ics21types.ErrInvalidType)
   }
-  RemoveAccountBlocklist(data) // todo: same as above. in case of Ordered channels this would close the channel. should handle that. but in general, how to handle? re-attempt to send permissions update again?
+  // todo: same as above. in case of Ordered channels this would close the channel. should handle that. but in general, how to handle? re-attempt to send permissions update again?
 }
 ```
 
@@ -343,13 +356,11 @@ function RegisterPermissionedToken (
   // denom is the existing token denom which will now be permissioned via ICS21
   denom: string,
   // owner is the address responsible for updating the permissions of the token
-  owner: string
+  owner: string,
+  // signer is the address sending executing this entrypoint
+  signer: string, 
 ) {
-  // Ensure the denom is registered with the x.bank module
-  denomExists = GetDenomFromBank(denom)
-  abortTransactionUnless(denomExists == true)
-  
-  // todo: check if the owner is a known tokenfactory owner. alt, expose this as a keeper to be called from within token factory and not as an explicit msg 
+  abortTransactionUnless(signer !== authority) 
   SetPermissionedDenom(denom, owner)
 }
 ```
@@ -377,15 +388,31 @@ function UpdateChannelAllowlist (
     // Ensure the channel is of type ICS20
     channelInfo = GetIBCChannelInfo(channel)
     abortTransactionUnless(channelInfo.Port == "transfer")
-    permissions.ChannelAllowlist.push(channel)
+    abortTransactionUnless(channelInfo.Version == "ics20-1")
+    // Tie the allowed ICS20 channel to its assigned ICS21 channel. We don't yet know the ICS21 channel
+	  // so we keep it blank. This state can only be set here. OnChanOpenInit will check this and error if
+	  // the ICS20 channel has not been "initialized"
+	  k.ChannelMap.Set(ctx, msg.ChannelId, "")
+    // Queuing the new ics21 channel creation
+    version = ics21types.VersionMetadata{
+      Version:       types.Version,
+      Denom:         msg.Denom,
+      Owner:         owner,
+      HostICS20CH:   msg.ChannelId,
+      MirrorICS20CH: ch.Counterparty.ChannelId,
+    }
+    channeltypes.NewChannelOpenInit(
+      // should the port ID have the denom name as part of it? if there are multiple permissioned denoms across same ICS20?
+      "ics21host",
+      version, 
+      channeltypes.ORDERED, 
+      channelInfo.ConnectionHops, 
+      "ics21mirror"
+    )
   }
   for var channel in removedChannels {
-    permissions.ChannelAllowlist.pop(channel)
+    // todo: close channels here?
   }
-
-  SetPermissions(denom, permissions)
-
-  // todo: should we consider initiating a new ICS21 channel here itself for every allowedChannel? this would mean for every Permissioned Token, there will be a dedicated channel. We could store a mapping of denom -> ics21 channels across all chains. Easy lookup for when permissions need to be updated everywhere. This would also allow to use Ordered Channels without ending up in a situation where the channel closes for all due to one timeout. so it reduces surface area of that kinda issues. we could trigger channel closes for removedChannels too
 }
 ```
 
@@ -404,6 +431,7 @@ function UpdateAccountBlocklist (
   // removeFromBlocklist is a list of pubkekys which can now interact with the denom
   removeFromBlocklist: bytes[]
 ) {
+  // todo update to add either pubkeys or addresses
   // Ensure only denom owner can update the allowlist
   owner = GetPermissionedDenomOwner(denom)
   abortTransactionUnless(owner == sender)
@@ -436,8 +464,8 @@ function UpdateAccountBlocklist (
 
 #### Antehandler
 
-The ante handler functionality provided by the Cosmos-SDK allows the restriction of Permissioned Tokens from being sent across any channels except the channel it came from.
-For every msg in a transaction, a check if performed to see if its a ICS20 transfer message. If it is, and the denom is a Permissioned Token denom, then the source port and source channel is checked against the channel the Permissioned Token came from. If they are the same, the transfer is allowed, else an error is returned.
+The ante handler functionality provided by the Cosmos-SDK allows the implementation of restrictions of Permissioned Tokens from being sent across any channels except the channel it came from.
+For every msg in a transaction, a check is performed to see if its an ICS20 transfer message. If it is, and the denom is a Permissioned Token denom, then the source port and source channel is checked against the channel the Permissioned Token came from. If they are the same, the transfer is allowed, else an error is returned.
 
 ```go
 var _ sdk.AnteDecorator = ICS21Decorator{}
@@ -479,7 +507,7 @@ func (i ICS21Decorator) HandleMsgTransfer(ctx sdk.Context, msg *transfertypes.Ms
 
 #### SendRestrictionFn
 
-The x/bank module in Cosmos-SDK v0.50.x onwards allows a protocol to provide custom SendRestrictions. This can be used to ensure that the AccountBlocklist is ensured for native transfers on the Mirror Chain.
+The x/bank module in Cosmos-SDK v0.50.x onwards allows a protocol to provide custom SendRestrictions. This can be used to ensure that the AccountBlocklist is honoured for native transfers on the Mirror Chain.
 
 `type SendRestrictionFn func(ctx context.Context, fromAddr, toAddr sdk.AccAddress, amt sdk.Coins) (newToAddr sdk.AccAddress, err error)`
 
@@ -530,7 +558,7 @@ ICS21 permissions will not apply to tokens which were sent before ICS21 was acti
 
 ## Future Improvements
 
-Handle trahsfer natively in the protocol insteaed of relying on ICS20 and building wrappers around it
+Handle transfer natively in the protocol insteaed of relying on ICS20 and relying on Antehandlers
 
 ## History
 
